@@ -3,12 +3,13 @@
 // npm install express cors firebase-admin firebase-functions bcrypt google-auth-library
 
 const functions = require("firebase-functions");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
 const bcrypt = require("bcrypt");
 const { OAuth2Client } = require("google-auth-library");
-const serviceAccount = require("./config/serviceAccountKey.json"); // ajuste o caminho se necessário
+const serviceAccount = require("./config/serviceAccountKey.json");
 
 // ----------------------
 // Configs / Constantes
@@ -43,31 +44,6 @@ app.use(express.json());
 app.get("/", (req, res) => {
   res.send("API funcionando! 🚀");
 });
-
-
-// ---------- Auth: login tradicional ----------
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ success: false, message: "E-mail e senha são obrigatórios." });
-
-  try {
-    const snapshot = await db.collection("DHO_users").where("email", "==", email).get();
-    if (snapshot.empty) return res.status(404).json({ success: false, message: "Usuário não encontrado." });
-
-    const userDoc = snapshot.docs[0];
-    const user = userDoc.data();
-
-    const isPasswordValid = await bcrypt.compare(password, user.password || "");
-    if (!isPasswordValid) return res.status(401).json({ success: false, message: "Senha incorreta." });
-
-    delete user.password;
-    return res.status(200).json({ success: true, user });
-  } catch (error) {
-    console.error("Erro ao fazer login:", error);
-    return res.status(500).json({ success: false, message: "Erro interno no servidor." });
-  }
-});
-
 
 // ---------- Usuários CRUD ----------
 app.get("/users", async (req, res) => {
@@ -377,24 +353,139 @@ app.delete("/teams/:id", async (req, res) => {
 // ---------- Firebase SSO endpoint ----------
 app.post("/auth/sso-firebase", async (req, res) => {
   const { firebaseIdToken } = req.body;
+
   if (!firebaseIdToken) return res.status(400).json({ success: false, message: "Token não fornecido." });
 
   try {
+    // 1. Decodificar o token e extrair dados do Google/Firebase
     const decodedToken = await admin.auth().verifyIdToken(firebaseIdToken);
     const userEmail = decodedToken.email;
+    // NOVO: Extrair o nome e a URL da foto do token decodificado
+    const userName = decodedToken.name;
+    const userPhotoUrl = decodedToken.picture; // 'picture' é a propriedade da URL da foto no JWT
+
+    console.log("Token recebido:", firebaseIdToken); // só para confirmar
+    console.log("Decoded Token:", decodedToken); // MOSTRA TUDO DO TOKEN
+    console.log("Foto do Google:", decodedToken.picture); // VE SE VEIO A FOTO
+    console.log("Nome:", userName);
+    console.log("URL da foto:", userPhotoUrl);
+
     if (!userEmail || !userEmail.endsWith(`@${DOMINIO_CORPORATIVO}`)) {
       return res.status(401).json({ success: false, message: `Acesso restrito a contas corporativas do domínio ${DOMINIO_CORPORATIVO}` });
     }
 
+    // 2. Buscar dados de permissão no Firestore/DB
     const snapshot = await db.collection("DHO_users").where("email", "==", userEmail).get();
     if (snapshot.empty) return res.status(404).json({ success: false, message: "Usuário corporativo não cadastrado no sistema de dashboards. Contate o administrador." });
 
-    const user = snapshot.docs[0].data();
-    return res.status(200).json({ success: true, user: { email: user.email, accessLevel: user.accessLevel, team: user.team } });
+    const userPerms = snapshot.docs[0].data();
+
+    // 3. Montar e retornar a resposta COMPLETA
+    return res.status(200).json({ 
+      success: true, 
+      user: { 
+        email: userPerms.email, 
+        accessLevel: userPerms.accessLevel, 
+        team: userPerms.team,
+        name: userName, 
+        photoUrl: userPhotoUrl
+      } 
+    });
 
   } catch (error) {
     console.error("Erro no processo de Firebase SSO:", error);
     return res.status(500).json({ success: false, message: "Falha na autenticação. Verifique o token ou as configurações do Firebase." });
+  }
+
+});
+
+// ---------- Dashboard Click Tracking ----------
+app.post("/dashboard/click", async (req, res) => {
+  try {
+    const { dashboardId, userEmail, userName, userTeam, dashboardTitle } = req.body;
+    
+    if (!dashboardId || !userEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Dashboard ID e e-mail são obrigatórios.' 
+      });
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(now);
+    expiresAt.setMonth(expiresAt.getMonth() + 2); // Expira em 2 meses
+
+    const clickRef = await db.collection("DHO_dashboard_clicks").add({
+      dashboardId,
+      userEmail,
+      userName: userName || '',
+      userTeam: userTeam || '',
+      dashboardTitle: dashboardTitle || '',
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      isActive: true
+    });
+
+    console.log(`📊 Click registrado: ${userEmail} no dashboard ${dashboardId}`);
+
+    return res.status(201).json({ 
+      success: true, 
+      message: 'Click registrado com sucesso!', 
+      id: clickRef.id 
+    });
+  } catch (error) {
+    console.error('❌ Erro ao registrar click:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Erro interno no servidor.' 
+    });
+  }
+});
+
+// Opcional: Endpoint para relatórios (apenas admin)
+app.get("/dashboard/clicks", async (req, res) => {
+  console.log('📊 GET /dashboard/clicks chamado com query:', req.query);
+  
+  try {
+    // Query básica sem filtros complexos inicialmente
+    let query = db.collection("DHO_dashboard_clicks")
+                  .where("isActive", "==", true)
+                  .orderBy("timestamp", "desc")
+                  .limit(50); // Limite para testes
+
+    const snapshot = await query.get();
+    console.log(`📊 Encontrados ${snapshot.size} documentos`);
+
+    const clicks = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        // Converte Timestamp para objeto serializável
+        timestamp: data.timestamp ? {
+          _seconds: data.timestamp._seconds,
+          _nanoseconds: data.timestamp._nanoseconds
+        } : null,
+        expiresAt: data.expiresAt ? {
+          _seconds: data.expiresAt._seconds,
+          _nanoseconds: data.expiresAt._nanoseconds
+        } : null
+      };
+    });
+
+    console.log('📊 Cliques formatados:', clicks.length);
+
+    return res.status(200).json({ 
+      success: true, 
+      data: clicks 
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro CRÍTICO em /dashboard/clicks:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: `Erro interno: ${error.message}` 
+    });
   }
 });
 
@@ -402,4 +493,6 @@ app.post("/auth/sso-firebase", async (req, res) => {
 // ----------------------
 // Export para Firebase Functions
 // ----------------------
-exports.api = functions.https.onRequest(app);
+const { onRequest } = require("firebase-functions/v2/https");
+exports.api = onRequest(app);
+
