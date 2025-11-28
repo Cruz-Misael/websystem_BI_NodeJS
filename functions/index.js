@@ -1,498 +1,372 @@
-// index.js (Firebase Functions + Express)
-// Requerimentos:
-// npm install express cors firebase-admin firebase-functions bcrypt google-auth-library
-
-const functions = require("firebase-functions");
-const { onSchedule } = require("firebase-functions/v2/scheduler");
+// index.js — Backend 100% Atualizado
 const express = require("express");
-const cors = require("cors");
 const admin = require("firebase-admin");
-const bcrypt = require("bcrypt");
-const { OAuth2Client } = require("google-auth-library");
 const serviceAccount = require("./config/serviceAccountKey.json");
+const cors = require("cors");
 
-// ----------------------
-// Configs / Constantes
-// ----------------------
-const CLIENT_ID = "46833138450-ps3eevvdcmlfg5l563lqtjgan1cal1d5.apps.googleusercontent.com";
-const DOMINIO_CORPORATIVO = "sebratel.com.br"; 
-const client = new OAuth2Client(CLIENT_ID);
-
-// ----------------------
-// Inicializa Firebase Admin
-// ----------------------
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://sebratel-tecnologia.firebaseio.com",
 });
+
 const db = admin.firestore();
-
-// ----------------------
-// App Express
-// ----------------------
 const app = express();
-
-// CORS - permitimos todas origens durante desenvolvimento; em produção restrinja
-app.use(cors({ origin: true }));
+app.use(cors());
 app.use(express.json());
 
-// ----------------------
-// Rotas
-// ----------------------
+/* =========================================================
+   USERS
+   ========================================================= */
 
-// Rota de teste
-app.get("/", (req, res) => {
-  res.send("API funcionando! 🚀");
-});
-
-// ---------- Usuários CRUD ----------
-app.get("/users", async (req, res) => {
+app.post("/users", async (req, res) => {
   try {
-    const snapshot = await db.collection("DHO_users").get();
-    const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.status(200).json(users);
-  } catch (error) {
-    console.error("Erro ao buscar usuários:", error);
-    return res.status(500).json({ message: "Erro interno no servidor." });
+    const { name, email, accessLevel } = req.body;
+    if (!name || !email)
+      return res.status(400).json({ success: false, message: "Nome e email são obrigatórios" });
+
+    const userRef = await db.collection("DHO_users").add({
+      name,
+      email,
+      accessLevel: accessLevel || "user",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const doc = await userRef.get();
+    return res.status(201).json({ success: true, data: { id: doc.id, ...doc.data() } });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro interno" });
   }
 });
 
-app.post("/users", async (req, res) => {
-  const { name, email, accessLevel, team } = req.body;
+app.get("/users", async (_req, res) => {
   try {
-    const ref = await db.collection("DHO_users").add({ name, email, accessLevel, team });
-    return res.status(201).json({ success: true, message: "Usuário salvo com sucesso!", id: ref.id });
-  } catch (error) {
-    console.error("Erro ao salvar usuário:", error);
-    return res.status(500).json({ success: false, message: "Erro interno no servidor." });
+    const snap = await db.collection("DHO_users").get();
+    return res.status(200).json({
+      success: true,
+      data: snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao listar usuários" });
   }
 });
 
 app.put("/users/:id", async (req, res) => {
-  const { id } = req.params;
-  const { name, email, accessLevel, team } = req.body;
   try {
-    const userRef = db.collection("DHO_users").doc(id);
-    const doc = await userRef.get();
-    if (!doc.exists) return res.status(404).json({ success: false, message: "Usuário não encontrado." });
+    const { id } = req.params;
+    const { name, email, accessLevel } = req.body;
 
-    await userRef.update({ name, email, accessLevel, team });
-    return res.status(200).json({ success: true, message: "Usuário atualizado com sucesso!" });
-  } catch (error) {
-    console.error("Erro ao atualizar usuário:", error);
-    return res.status(500).json({ success: false, message: "Erro interno no servidor." });
+    const userRef = db.collection("DHO_users").doc(id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists)
+      return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+
+    await userRef.update({
+      name,
+      email,
+      accessLevel,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const updatedUser = await userRef.get();
+    return res.status(200).json({ success: true, data: { id: updatedUser.id, ...updatedUser.data() } });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao atualizar usuário" });
   }
 });
 
 app.delete("/users/:id", async (req, res) => {
-  const { id } = req.params;
   try {
+    const { id } = req.params;
     await db.collection("DHO_users").doc(id).delete();
-    return res.status(200).json({ message: "Usuário excluído com sucesso!" });
-  } catch (error) {
-    console.error("Erro ao excluir usuário:", error);
-    return res.status(500).json({ message: "Erro interno no servidor." });
+    return res.status(200).json({ success: true, message: "Usuário removido" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao deletar usuário" });
   }
 });
 
+/* =========================================================
+   DASHBOARDS
+   ========================================================= */
 
-// ---------- Verifica email / altera senha ----------
-app.post("/check-email", async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ success: false, message: "O campo e-mail é obrigatório." });
-
-  try {
-    const snapshot = await db.collection("DHO_users").where("email", "==", email).get();
-    if (snapshot.empty) return res.status(200).json({ success: true, exists: false, message: "E-mail não encontrado." });
-
-    const user = snapshot.docs[0].data();
-    const hasPassword = !!user.password;
-    return res.status(200).json({ success: true, exists: hasPassword, message: hasPassword ? "E-mail já possui uma senha registrada." : "E-mail existe, mas sem senha." });
-  } catch (error) {
-    console.error("Erro ao verificar e-mail:", error);
-    return res.status(500).json({ success: false, message: "Erro interno no servidor." });
-  }
-});
-
-app.post("/change-password", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ success: false, message: "E-mail e senha são obrigatórios." });
-
-  try {
-    const snapshot = await db.collection("DHO_users").where("email", "==", email).get();
-    if (snapshot.empty) return res.status(404).json({ success: false, message: "Usuário não encontrado." });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    await snapshot.docs[0].ref.update({ password: hashedPassword });
-    return res.status(200).json({ success: true, message: "Senha alterada com sucesso!" });
-  } catch (error) {
-    console.error("Erro ao alterar senha:", error);
-    return res.status(500).json({ success: false, message: "Erro interno no servidor." });
-  }
-});
-
-
-// ---------- Dashboards ----------
 app.post("/dashboard", async (req, res) => {
   try {
-    const { title, description, url, thumbnail } = req.body;
-    const docRef = await db.collection("DHO_dashboards").add({
+    const { title, url, description } = req.body;
+
+    if (!title || !url)
+      return res.status(400).json({ success: false, message: "Título e URL são obrigatórios" });
+
+    const dashRef = await db.collection("DHO_dashboards").add({
       title,
-      description,
       url,
-      thumbnail: thumbnail || '',
-      isActive: true,
+      description: description || "",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    return res.status(201).json({ id: docRef.id });
-  } catch (error) {
-    console.error("Error creating dashboard:", error);
-    return res.status(500).send("Error creating dashboard");
+
+    const doc = await dashRef.get();
+    return res.status(201).json({ success: true, data: { id: doc.id, ...doc.data() } });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao criar dashboard" });
   }
 });
 
-app.get("/dashboard", async (req, res) => {
+app.get("/dashboard", async (_req, res) => {
   try {
-    const snapshot = await db.collection("DHO_dashboards").where("isActive", "==", true).get();
-    const dashboards = await Promise.all(snapshot.docs.map(async doc => {
-      const dashboardData = doc.data();
-      const accessSnapshot = await db.collection("DHO_dashboard_access").where("dashboardID", "==", doc.id).where("isActive", "==", true).get();
-      const teamsWithAccess = accessSnapshot.docs.map(d => d.data().team);
-      return { id: doc.id, ...dashboardData, teamsWithAccess };
-    }));
-    return res.status(200).json(dashboards);
-  } catch (error) {
-    console.error("Error fetching all dashboards:", error);
-    return res.status(500).send('Error fetching dashboards');
-  }
-});
+    const snap = await db.collection("DHO_dashboards").get();
 
-app.get("/dashboard/team/:team", async (req, res) => {
-  try {
-    const { team } = req.params;
-    const accessSnapshot = await db.collection("DHO_dashboard_access").where("team", "==", team).where("isActive", "==", true).get();
-    if (accessSnapshot.empty) return res.status(200).json([]);
+    const dashboards = await Promise.all(
+      snap.docs.map(async (doc) => {
+        const accessSnap = await db
+          .collection("DHO_dashboard_access_email")
+          .where("dashboardID", "==", doc.id)
+          .where("isActive", "==", true)
+          .get();
 
-    const dashboardIDs = accessSnapshot.docs.map(d => d.data().dashboardID);
-    const dashboards = [];
-    const batchSize = 10;
-    for (let i = 0; i < dashboardIDs.length; i += batchSize) {
-      const batch = dashboardIDs.slice(i, i + batchSize);
-      const snap = await db.collection("DHO_dashboards").where(admin.firestore.FieldPath.documentId(), "in", batch).where("isActive", "==", true).get();
-      snap.docs.forEach(doc => dashboards.push({ id: doc.id, ...doc.data() }));
-    }
-    return res.status(200).json(dashboards);
-  } catch (error) {
-    console.error("Erro ao buscar dashboards:", error);
-    return res.status(500).send('Erro interno ao buscar dashboards');
+        const emailsWithAccess = accessSnap.docs.map((d) => d.data().email);
+
+        return {
+          id: doc.id,
+          ...doc.data(),
+          emailsWithAccess,
+        };
+      })
+    );
+
+    return res.status(200).json({ success: true, data: dashboards });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao listar dashboards" });
   }
 });
 
 app.delete("/dashboards/:id", async (req, res) => {
-  const { id } = req.params;
   try {
-    await db.collection('DHO_dashboards').doc(id).delete();
-    return res.status(200).json({ message: "Dashboard deletado com sucesso." });
-  } catch (error) {
-    console.error("Erro detalhado ao deletar dashboard:", error);
-    return res.status(500).json({ error: "Erro ao deletar dashboard." });
+    await db.collection("DHO_dashboards").doc(req.params.id).delete();
+    return res.status(200).json({ success: true, message: "Dashboard removida" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao remover dashboard" });
   }
 });
 
-app.put("/dashboards/:id", async (req, res) => {
-  const { id } = req.params;
-  const { title, description, url } = req.body;
-  if (!title && !description && !url) return res.status(400).json({ error: "É necessário fornecer título ou descrição." });
+/* =========================================================
+   ACESSO POR EMAIL
+   ========================================================= */
 
+app.post("/dashboard/access-email", async (req, res) => {
   try {
-    const dashboardRef = db.collection("DHO_dashboards").doc(id);
-    const doc = await dashboardRef.get();
-    if (!doc.exists) return res.status(404).json({ error: "Dashboard não encontrada." });
+    const { dashboardID, email } = req.body;
 
-    const update = {};
-    if (title) update.title = title;
-    if (description) update.description = description;
-    if (url) update.url = url;
-    update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+    if (!dashboardID || !email)
+      return res.status(400).json({ success: false, message: "dashboardID e email são obrigatórios" });
 
-    await dashboardRef.update(update);
-    const updatedDoc = await dashboardRef.get();
-    return res.status(200).json({ id: updatedDoc.id, ...updatedDoc.data() });
-  } catch (error) {
-    console.error("Erro ao atualizar dashboard:", error);
-    return res.status(500).json({ error: "Erro ao atualizar dashboard." });
-  }
-});
+    const existing = await db
+      .collection("DHO_dashboard_access_email")
+      .where("dashboardID", "==", dashboardID)
+      .where("email", "==", email)
+      .get();
 
+    if (!existing.empty) {
+      await existing.docs[0].ref.update({
+        isActive: true,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
 
-// ---------- Dashboard Access (create/update/delete/get) ----------
-app.get("/dashboard/access", async (req, res) => {
-  try {
-    const { dashboardId } = req.query;
-    if (!dashboardId) return res.status(400).json({ success: false, message: 'ID do dashboard é obrigatório' });
-
-    const snapshot = await db.collection('DHO_dashboard_access').where('dashboardID', '==', dashboardId).where('isActive', '==', true).get();
-    const accessRules = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.status(200).json({ success: true, data: accessRules });
-  } catch (error) {
-    console.error('Erro ao buscar regras de acesso:', error);
-    return res.status(500).json({ success: false, message: 'Erro ao buscar regras de acesso' });
-  }
-});
-
-app.post("/dashboard/access", async (req, res) => {
-  try {
-    const { dashboardID, team, accessLevel = 'view' } = req.body;
-    if (!dashboardID || !team) return res.status(400).json({ success: false, message: 'ID do dashboard e time são obrigatórios' });
-
-    const existingRule = await db.collection('DHO_dashboard_access').where('dashboardID', '==', dashboardID).where('team', '==', team).where('isActive', '==', true).get();
-    let result;
-    if (!existingRule.empty) {
-      const docId = existingRule.docs[0].id;
-      await db.collection('DHO_dashboard_access').doc(docId).update({ accessLevel, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-      result = { id: docId, action: 'updated' };
-    } else {
-      const docRef = await db.collection('DHO_dashboard_access').add({ dashboardID, team, accessLevel, isActive: true, createdAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-      result = { id: docRef.id, action: 'created' };
-    }
-    return res.status(200).json({ success: true, message: 'Regra de acesso atualizada com sucesso', data: result });
-  } catch (error) {
-    console.error('Erro ao atualizar regra de acesso:', error);
-    return res.status(500).json({ success: false, message: 'Erro ao atualizar regra de acesso' });
-  }
-});
-
-app.delete("/dashboard/access", async (req, res) => {
-  try {
-    const { dashboardID, team } = req.body;
-    if (!dashboardID || !team) return res.status(400).json({ success: false, message: 'ID do dashboard e time são obrigatórios' });
-
-    const snapshot = await db.collection('DHO_dashboard_access').where('dashboardID', '==', dashboardID).where('team', '==', team).where('isActive', '==', true).get();
-    if (snapshot.empty) return res.status(404).json({ success: false, message: 'Regra de acesso não encontrada' });
-
-    const docId = snapshot.docs[0].id;
-    await db.collection('DHO_dashboard_access').doc(docId).update({ isActive: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    return res.status(200).json({ success: true, message: 'Acesso removido com sucesso' });
-  } catch (error) {
-    console.error('Erro ao remover acesso:', error);
-    return res.status(500).json({ success: false, message: 'Erro ao remover acesso' });
-  }
-});
-
-
-// ---------- Teams CRUD ----------
-app.post("/teams", async (req, res) => {
-  try {
-    const { name, description } = req.body;
-    if (!name || typeof name !== 'string' || name.trim() === '') return res.status(400).json({ success: false, message: 'Nome do time é obrigatório.' });
-
-    const normalizedName = name.trim().toLowerCase();
-    const existingTeam = await db.collection('DHO_teams').where('nameNormalized', '==', normalizedName).get();
-    if (!existingTeam.empty) return res.status(409).json({ success: false, message: 'Já existe um time com este nome.' });
-
-    const teamRef = await db.collection('DHO_teams').add({
-      name: name.trim(),
-      nameNormalized: normalizedName,
-      description: (description || '').trim(),
-      isActive: true,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return res.status(201).json({ success: true, message: 'Time criado com sucesso!', id: teamRef.id, name: name.trim() });
-  } catch (error) {
-    console.error('Erro ao criar time:', error);
-    return res.status(500).json({ success: false, message: 'Erro interno no servidor.' });
-  }
-});
-
-app.get("/teams", async (req, res) => {
-  try {
-    const snapshot = await db.collection('DHO_teams').get();
-    const teams = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return res.status(200).json({ success: true, data: teams });
-  } catch (error) {
-    console.error('ERRO NO BACKEND:', error);
-    return res.status(500).json({ success: false, message: 'Falha ao buscar times' });
-  }
-});
-
-app.put("/teams/:id", async (req, res) => {
-  const { id } = req.params;
-  const { name, description } = req.body;
-  try {
-    const teamRef = db.collection('DHO_teams').doc(id);
-    const doc = await teamRef.get();
-    if (!doc.exists) return res.status(404).json({ success: false, message: 'Time não encontrado.' });
-
-    await teamRef.update({ name, description, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    return res.status(200).json({ success: true, message: 'Time atualizado com sucesso!' });
-  } catch (error) {
-    console.error('Erro ao atualizar time:', error);
-    return res.status(500).json({ success: false, message: 'Erro interno no servidor.' });
-  }
-});
-
-app.delete("/teams/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const teamRef = db.collection('DHO_teams').doc(id);
-    const doc = await teamRef.get();
-    if (!doc.exists) return res.status(404).json({ success: false, message: 'Time não encontrado.' });
-
-    await teamRef.delete();
-    return res.status(200).json({ success: true, message: 'Time deletado com sucesso!' });
-  } catch (error) {
-    console.error('Erro ao deletar time:', error);
-    return res.status(500).json({ success: false, message: 'Erro interno no servidor.' });
-  }
-});
-
-
-// ---------- Firebase SSO endpoint ----------
-app.post("/auth/sso-firebase", async (req, res) => {
-  const { firebaseIdToken } = req.body;
-
-  if (!firebaseIdToken) return res.status(400).json({ success: false, message: "Token não fornecido." });
-
-  try {
-    // 1. Decodificar o token e extrair dados do Google/Firebase
-    const decodedToken = await admin.auth().verifyIdToken(firebaseIdToken);
-    const userEmail = decodedToken.email;
-    // NOVO: Extrair o nome e a URL da foto do token decodificado
-    const userName = decodedToken.name;
-    const userPhotoUrl = decodedToken.picture; // 'picture' é a propriedade da URL da foto no JWT
-
-    console.log("Token recebido:", firebaseIdToken); // só para confirmar
-    console.log("Decoded Token:", decodedToken); // MOSTRA TUDO DO TOKEN
-    console.log("Foto do Google:", decodedToken.picture); // VE SE VEIO A FOTO
-    console.log("Nome:", userName);
-    console.log("URL da foto:", userPhotoUrl);
-
-    if (!userEmail || !userEmail.endsWith(`@${DOMINIO_CORPORATIVO}`)) {
-      return res.status(401).json({ success: false, message: `Acesso restrito a contas corporativas do domínio ${DOMINIO_CORPORATIVO}` });
-    }
-
-    // 2. Buscar dados de permissão no Firestore/DB
-    const snapshot = await db.collection("DHO_users").where("email", "==", userEmail).get();
-    if (snapshot.empty) return res.status(404).json({ success: false, message: "Usuário corporativo não cadastrado no sistema de dashboards. Contate o administrador." });
-
-    const userPerms = snapshot.docs[0].data();
-
-    // 3. Montar e retornar a resposta COMPLETA
-    return res.status(200).json({ 
-      success: true, 
-      user: { 
-        email: userPerms.email, 
-        accessLevel: userPerms.accessLevel, 
-        team: userPerms.team,
-        name: userName, 
-        photoUrl: userPhotoUrl
-      } 
-    });
-
-  } catch (error) {
-    console.error("Erro no processo de Firebase SSO:", error);
-    return res.status(500).json({ success: false, message: "Falha na autenticação. Verifique o token ou as configurações do Firebase." });
-  }
-
-});
-
-// ---------- Dashboard Click Tracking ----------
-app.post("/dashboard/click", async (req, res) => {
-  try {
-    const { dashboardId, userEmail, userName, userTeam, dashboardTitle } = req.body;
-    
-    if (!dashboardId || !userEmail) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Dashboard ID e e-mail são obrigatórios.' 
+      return res.status(200).json({
+        success: true,
+        message: "Acesso reativado para este e-mail",
       });
     }
 
-    const now = new Date();
-    const expiresAt = new Date(now);
-    expiresAt.setMonth(expiresAt.getMonth() + 2); // Expira em 2 meses
-
-    const clickRef = await db.collection("DHO_dashboard_clicks").add({
-      dashboardId,
-      userEmail,
-      userName: userName || '',
-      userTeam: userTeam || '',
-      dashboardTitle: dashboardTitle || '',
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
-      isActive: true
+    await db.collection("DHO_dashboard_access_email").add({
+      dashboardID,
+      email,
+      isActive: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    console.log(`📊 Click registrado: ${userEmail} no dashboard ${dashboardId}`);
-
-    return res.status(201).json({ 
-      success: true, 
-      message: 'Click registrado com sucesso!', 
-      id: clickRef.id 
-    });
-  } catch (error) {
-    console.error('❌ Erro ao registrar click:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Erro interno no servidor.' 
-    });
+    return res.status(201).json({ success: true, message: "Acesso concedido" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao criar acesso" });
   }
 });
 
-// Opcional: Endpoint para relatórios (apenas admin)
-app.get("/dashboard/clicks", async (req, res) => {
-  console.log('📊 GET /dashboard/clicks chamado com query:', req.query);
-  
+app.get("/dashboard/access-email", async (req, res) => {
   try {
-    // Query básica sem filtros complexos inicialmente
-    let query = db.collection("DHO_dashboard_clicks")
-                  .where("isActive", "==", true)
-                  .orderBy("timestamp", "desc")
-                  .limit(50); // Limite para testes
+    const { dashboardID } = req.query;
 
-    const snapshot = await query.get();
-    console.log(`📊 Encontrados ${snapshot.size} documentos`);
+    if (!dashboardID)
+      return res.status(400).json({ success: false, message: "dashboardID é obrigatório" });
 
-    const clicks = snapshot.docs.map(doc => {
+    const snap = await db
+      .collection("DHO_dashboard_access_email")
+      .where("dashboardID", "==", dashboardID)
+      .where("isActive", "==", true)
+      .get();
+
+    return res.status(200).json({
+      success: true,
+      data: snap.docs.map((d) => ({ id: d.id, ...d.data() })),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao listar acessos" });
+  }
+});
+
+app.delete("/dashboard/access-email", async (req, res) => {
+  try {
+    const { dashboardID, email } = req.body;
+
+    const snap = await db
+      .collection("DHO_dashboard_access_email")
+      .where("dashboardID", "==", dashboardID)
+      .where("email", "==", email)
+      .where("isActive", "==", true)
+      .get();
+
+    if (snap.empty)
+      return res.status(404).json({ success: false, message: "Acesso não encontrado" });
+
+    await snap.docs[0].ref.update({
+      isActive: false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true, message: "Acesso removido" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao remover acesso" });
+  }
+});
+
+/* =========================================================
+   CONSULTA: TODAS AS DASHBOARDS QUE O EMAIL TEM ACESSO
+   ========================================================= */
+
+app.get("/dashboard/email/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase();
+
+    const snap = await db
+      .collection("DHO_dashboard_access_email")
+      .where("email", "==", email)
+      .where("isActive", "==", true)
+      .get();
+
+    const permissions = [];
+    const dashIDs = new Set();
+
+    snap.forEach((doc) => {
       const data = doc.data();
-      return {
-        id: doc.id,
-        ...data,
-        // Converte Timestamp para objeto serializável
-        timestamp: data.timestamp ? {
-          _seconds: data.timestamp._seconds,
-          _nanoseconds: data.timestamp._nanoseconds
-        } : null,
-        expiresAt: data.expiresAt ? {
-          _seconds: data.expiresAt._seconds,
-          _nanoseconds: data.expiresAt._nanoseconds
-        } : null
-      };
+      dashIDs.add(data.dashboardID);
+      permissions.push({ id: doc.id, ...data });
     });
 
-    console.log('📊 Cliques formatados:', clicks.length);
+    const dashboards = [];
 
-    return res.status(200).json({ 
-      success: true, 
-      data: clicks 
+    for (const dashboardID of dashIDs) {
+      const dashSnap = await db.collection("DHO_dashboards").doc(dashboardID).get();
+      if (dashSnap.exists) {
+        dashboards.push({ id: dashboardID, ...dashSnap.data() });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      dashboards,
+      accessDetails: permissions,
     });
-    
-  } catch (error) {
-    console.error('❌ Erro CRÍTICO em /dashboard/clicks:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: `Erro interno: ${error.message}` 
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao buscar permissões de dashboards",
     });
   }
 });
 
+/* =========================================================
+   TRACKING DE CLIQUES
+   ========================================================= */
 
-// ----------------------
-// Export para Firebase Functions
-// ----------------------
-const { onRequest } = require("firebase-functions/v2/https");
-exports.api = onRequest(app);
+app.post("/dashboard/click", async (req, res) => {
+  try {
+    const { dashboardID, userEmail } = req.body;
 
+    await db.collection("DHO_dashboard_clicks").add({
+      dashboardID,
+      userEmail,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.status(201).json({ success: true, message: "Clique registrado" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Erro ao registrar clique" });
+  }
+});
+
+app.get("/dashboard/clicks", async (req, res) => {
+  try {
+    const snap = await db.collection("DHO_dashboard_clicks").get();
+    return res.json({
+      success: true,
+      data: snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
+    });
+  } catch (err) {
+    console.error(err);
+  }
+});
+
+/* =========================================================
+   AUTH SSO FIREBASE
+   ========================================================= */
+
+app.post("/auth/sso-firebase", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const snap = await db.collection("DHO_users").where("email", "==", email).get();
+
+    if (snap.empty) {
+      // usuário padrão
+      return res.status(200).json({
+        success: true,
+        user: {
+          name: email,
+          email,
+          accessLevel: "user",
+          team: "Geral" // ← ADICIONA TEAM PADRÃO
+        },
+      });
+    }
+
+    const userData = snap.docs[0].data();
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        name: userData.name,
+        email: userData.email,
+        accessLevel: userData.accessLevel,
+        team: userData.team || "Geral" // ← ADICIONA TEAM DO USUÁRIO
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Erro na autenticação" });
+  }
+});
+
+/* ========================================================= */
+
+const PORT = 3001;
+app.listen(PORT, () => console.log(`API online na porta ${PORT}`));
