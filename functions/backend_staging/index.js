@@ -1,20 +1,35 @@
 // index.js — Backend Staging Firebase
+// IMPORTS — sempre primeiro
 const express = require("express");
 const admin = require("firebase-admin");
-const functions = require("firebase-functions");
-const serviceAccount = require("./config/serviceAccountKey.json");
+const { onRequest } = require("firebase-functions/v2/https");
 const cors = require("cors");
+const { OAuth2Client } = require("google-auth-library");
 
-const sseConnections = {};
+// INICIALIZAÇÃO DO FIREBASE — sempre logo após os imports
+admin.initializeApp();
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
+// FIRESTORE
 const db = admin.firestore();
+
+// CONFIG
+const sseConnections = {};
+const CLIENT_ID = "46833138450-ps3eevvdcmlfg5l563lqtjgan1cal1d5.apps.googleusercontent.com";
+const DOMINIO_CORPORATIVO = "sebratel.com.br";
+const client = new OAuth2Client(CLIENT_ID);
+
+// EXPRESS
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+  res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
+  next();
+});
+
+
+
 
 /* =========================================================
    USERS
@@ -283,31 +298,44 @@ app.get("/dashboard/clicks", async (_req, res) => {
 /* =========================================================
    AUTH SSO FIREBASE
 ========================================================= */
-app.post("/auth/sso-firebase", async (req, res) => {
-  try {
-    const { email } = req.body;
-    const snap = await db.collection("DHO_users").where("email", "==", email).get();
 
-    if (snap.empty) {
-      return res.status(200).json({
-        success: true,
-        user: { name: email, email, accessLevel: "user", team: "Geral" },
-      });
+app.post("/auth/sso-firebase", async (req, res) => {
+  const { firebaseIdToken } = req.body;
+  if (!firebaseIdToken) return res.status(400).json({ success: false, message: "Token não fornecido." });
+
+  try {
+    // 1. Decodificar o token e extrair dados do Google/Firebase
+    const decodedToken = await admin.auth().verifyIdToken(firebaseIdToken);
+    const userEmail = decodedToken.email;
+    // NOVO: Extrair o nome e a URL da foto do token decodificado
+    const userName = decodedToken.name;
+    const userPhotoUrl = decodedToken.picture; // 'picture' é a propriedade da URL da foto no JWT
+
+    if (!userEmail || !userEmail.endsWith(`@${DOMINIO_CORPORATIVO}`)) {
+      return res.status(401).json({ success: false, message: `Acesso restrito a contas corporativas do domínio ${DOMINIO_CORPORATIVO}` });
     }
 
-    const userData = snap.docs[0].data();
-    return res.status(200).json({
-      success: true,
-      user: {
-        name: userData.name,
-        email: userData.email,
-        accessLevel: userData.accessLevel,
-        team: userData.team || "Geral",
-      },
+    // 2. Buscar dados de permissão no Firestore/DB
+    const snapshot = await db.collection("DHO_users").where("email", "==", userEmail).get();
+    if (snapshot.empty) return res.status(404).json({ success: false, message: "Usuário corporativo não cadastrado no sistema de dashboards. Contate o administrador." });
+
+    const userPerms = snapshot.docs[0].data();
+
+    // 3. Montar e retornar a resposta COMPLETA
+    return res.status(200).json({ 
+      success: true, 
+      user: { 
+        email: userPerms.email, 
+        accessLevel: userPerms.accessLevel, 
+        team: userPerms.team,
+        name: userName, 
+        photoUrl: userPhotoUrl
+      } 
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: "Erro na autenticação" });
+
+  } catch (error) {
+    console.error("Erro no processo de Firebase SSO:", error);
+    return res.status(500).json({ success: false, message: "Falha na autenticação. Verifique o token ou as configurações do Firebase." });
   }
 });
 
@@ -337,22 +365,35 @@ app.get("/chat/stream/:email", (req, res) => {
   });
 });
 
+const messageQueue = {};
+
 app.post("/chat/response", (req, res) => {
   const { email, message } = req.body;
-  if (!email || !message) return res.status(400).json({ success: false, message: "Dados inválidos" });
+  if (!email || !message) return res.status(400).json({ success: false });
 
-  const connection = sseConnections[email];
-  if (!connection) {
-    console.log("⚠ Nenhuma conexão SSE ativa para:", email);
-    return res.status(200).json({ success: true, message: "Nenhum cliente online" });
+  if (!sseConnections[email]) {
+    // guarda temporariamente
+    if (!messageQueue[email]) messageQueue[email] = [];
+    messageQueue[email].push(message);
+    return res.status(200).json({ success: true, message: "Mensagem aguardando SSE" });
   }
 
-  connection.write("event: message\n");
+  const connection = sseConnections[email];
+  connection.write(`event: message\n`);
   connection.write(`data: ${JSON.stringify({ message })}\n\n`);
-  console.log("💬 Mensagem SSE enviada para:", email);
+
+  // envia mensagens da fila se houver
+  if (messageQueue[email]?.length) {
+    messageQueue[email].forEach((msg) => {
+      connection.write(`event: message\n`);
+      connection.write(`data: ${JSON.stringify({ message: msg })}\n\n`);
+    });
+    messageQueue[email] = [];
+  }
 
   return res.json({ success: true });
 });
+
 
 /* =========================================================
    EXPORT BACKEND
@@ -361,5 +402,11 @@ app.post("/chat/response", (req, res) => {
 // const PORT = 3001;
 // app.listen(PORT, () => console.log(`API online na porta ${PORT}`));
 
-exports.backend_staging = functions.https.onRequest(app); //staging
+exports.backend_staging = onRequest(
+  {
+    region: "us-central1",
+    cors: false, 
+  },
+  app
+);
 //exports.api = functions.https.onRequest(app); //dev

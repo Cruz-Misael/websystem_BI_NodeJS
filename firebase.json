@@ -1,16 +1,28 @@
 {
   "functions": [
     {
-      "source": "functions",
-      "codebase": "default",
+      "target": "backend_staging",
+      "source": "functions/backend_staging",
+      "codebase": "backend_staging",
       "ignore": [
         "node_modules",
         ".git",
         "firebase-debug.log",
         "firebase-debug.*.log",
         "*.local"
-      ],
-      "predeploy": []
+      ]
+    },
+    {
+      "target": "backend_prod",
+      "source": "functions/backend_prod",
+      "codebase": "backend_prod",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
     }
   ]
 }
