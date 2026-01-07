@@ -29,8 +29,6 @@ app.use((req, res, next) => {
 });
 
 
-
-
 /* =========================================================
    USERS
 ========================================================= */
@@ -301,34 +299,6 @@ app.get("/dashboard/email/:email", async (req, res) => {
 });
 
 /* =========================================================
-   TRACKING DE CLIQUES
-========================================================= */
-app.post("/dashboard/click", async (req, res) => {
-  try {
-    const { dashboardID, userEmail } = req.body;
-    await db.collection("DHO_dashboard_clicks").add({
-      dashboardID,
-      userEmail,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    return res.status(201).json({ success: true, message: "Clique registrado" });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: "Erro ao registrar clique" });
-  }
-});
-
-app.get("/dashboard/clicks", async (_req, res) => {
-  try {
-    const snap = await db.collection("DHO_dashboard_clicks").get();
-    return res.json({ success: true, data: snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: "Erro ao listar cliques" });
-  }
-});
-
-/* =========================================================
    AUTH SSO FIREBASE
 ========================================================= */
 
@@ -426,87 +396,6 @@ app.post("/chat/response", (req, res) => {
 
   return res.json({ success: true });
 });
-
-
-/* =========================================================
-   USERS INATIVOS (> 60 dias sem clicar)
-========================================================= */
-app.get("/users/inativos", async (_req, res) => {
-  try {
-    // === CONFIG ===
-    const DIAS = 60;
-    const doisMesesMs = DIAS * 24 * 60 * 60 * 1000;
-    const agora = Date.now();
-
-    // Ajuste aqui caso sua coleção de cliques tenha outro nome
-    const CLICK_COLLECTION = "DHO_dashboard_clicks";
-
-    // 1. Pega todos os usuários
-    const usersSnap = await db.collection("DHO_users").get();
-    const users = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-
-    // 2. Pega todos os cliques (coleção correta)
-    const clicksSnap = await db.collection(CLICK_COLLECTION).get();
-
-    // 3. Organizar último clique por email (normalizando)
-    const lastClicks = {}; // emailLower -> timestampMs
-
-    clicksSnap.forEach((doc) => {
-      const data = doc.data();
-      // possíveis chaves para email
-      const rawEmail = (data.userEmail || data.email || "").toString();
-      if (!rawEmail) return;
-      const email = rawEmail.toLowerCase().trim();
-
-      // converte timestamp para ms de forma segura
-      let tsMs = 0;
-      if (data.timestamp && typeof data.timestamp.toMillis === "function") {
-        tsMs = data.timestamp.toMillis();
-      } else if (data.timestamp && data.timestamp._seconds) {
-        tsMs = data.timestamp._seconds * 1000;
-      } else if (data.timestamp) {
-        // tenta com Date
-        const maybe = new Date(data.timestamp).getTime();
-        if (!Number.isNaN(maybe)) tsMs = maybe;
-      }
-
-      if (!tsMs) return; // sem timestamp válido
-
-      if (!lastClicks[email] || tsMs > lastClicks[email]) {
-        lastClicks[email] = tsMs;
-      }
-    });
-
-    // 4. Filtrar inativos
-    const inativos = users.filter((user) => {
-      const emailRaw = (user.email || "").toString();
-      const email = emailRaw.toLowerCase().trim();
-
-      const last = lastClicks[email];
-
-      // Se nunca clicou → considerar inativo
-      if (!last) return true;
-
-      // Se passou mais de DIAS dias
-      return (agora - last) > doisMesesMs;
-    });
-
-    return res.json({
-      success: true,
-      totalInativos: inativos.length,
-      data: inativos
-    });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      message: "Erro ao buscar usuários inativos"
-    });
-  }
-});
-
-
 
 
 /* =========================================================
