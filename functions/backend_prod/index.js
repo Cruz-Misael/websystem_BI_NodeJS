@@ -8,12 +8,13 @@ const { OAuth2Client } = require("google-auth-library");
 
 // INICIALIZAÇÃO DO FIREBASE — sempre logo após os imports
 admin.initializeApp();
+const rtdb = admin.database();
+
 
 // FIRESTORE
 const db = admin.firestore();
 
 // CONFIG
-const sseConnections = {};
 const CLIENT_ID = "46833138450-ps3eevvdcmlfg5l563lqtjgan1cal1d5.apps.googleusercontent.com";
 const DOMINIO_CORPORATIVO = "sebratel.com.br";
 const client = new OAuth2Client(CLIENT_ID);
@@ -343,56 +344,24 @@ app.post("/auth/sso-firebase", async (req, res) => {
 });
 
 /* =========================================================
-   CHAT SSE
+   CHAT
 ========================================================= */
-app.get("/chat/stream/:email", (req, res) => {
-  const email = req.params.email;
-  res.set({
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
-  res.flushHeaders();
-  sseConnections[email] = res;
-  console.log("🔌 Nova conexão SSE:", email);
 
-  const interval = setInterval(() => {
-    res.write("event: ping\n");
-    res.write("data: {}\n\n");
-  }, 30000);
-
-  req.on("close", () => {
-    console.log("❌ Conexão SSE fechada:", email);
-    clearInterval(interval);
-    delete sseConnections[email];
-  });
-});
-
-const messageQueue = {};
-
-app.post("/chat/response", (req, res) => {
+app.post("/chat/send", async (req, res) => {
   const { email, message } = req.body;
-  if (!email || !message) return res.status(400).json({ success: false });
-
-  if (!sseConnections[email]) {
-    // guarda temporariamente
-    if (!messageQueue[email]) messageQueue[email] = [];
-    messageQueue[email].push(message);
-    return res.status(200).json({ success: true, message: "Mensagem aguardando SSE" });
+  if (!email || !message) {
+    return res.status(400).json({ success: false });
   }
 
-  const connection = sseConnections[email];
-  connection.write(`event: message\n`);
-  connection.write(`data: ${JSON.stringify({ message })}\n\n`);
+  const safeEmail = email.replace(/\./g, "_");
 
-  // envia mensagens da fila se houver
-  if (messageQueue[email]?.length) {
-    messageQueue[email].forEach((msg) => {
-      connection.write(`event: message\n`);
-      connection.write(`data: ${JSON.stringify({ message: msg })}\n\n`);
+  await rtdb
+    .ref(`chat/inbox/${safeEmail}`)
+    .push({
+      from: "system",
+      text: message,
+      ts: Date.now()
     });
-    messageQueue[email] = [];
-  }
 
   return res.json({ success: true });
 });
